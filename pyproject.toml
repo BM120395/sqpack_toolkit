@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sqfs-repacker"
+version = "1.12.1"
+description = "Deterministic SquashFS analysis, extraction, repacking, and comparison toolkit"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "All Rights Reserved" }
+
+[project.optional-dependencies]
+# Only needed if you point the toolkit at images using these compressors --
+# see README "Is this specific to your file?" section.
+lz4 = ["lz4"]
+zstd = ["zstandard"]
+
+[project.scripts]
+# After `pip install .`, this exposes a plain `sqpack` command on PATH.
+# `python3 sqpack.py` (the root-level launcher) works identically without
+# installing anything.
+sqpack = "sqfs_repacker.sqpack:main"
+
+[tool.setuptools.packages.find]
+include = ["sqfs_repacker*"]
