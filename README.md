@@ -19,13 +19,30 @@ sqpack rootfs/ patched.squashfs           # repack: only edited files recompress
 
 ## Requirements
 
-- **Python 3.8+** (installed with the tool or system). No third-party runtime
-  dependencies for the core tool.
-- Optional compressors, only if you repack images that use them:
-  - **LZ4** → `lz4` package
-  - **ZSTD** → `zstandard` package
-  - LZO is detected and reported, but has no pure-Python decoder (clear
-    error, never fabricated output).
+**No third-party runtime dependencies.** The core toolkit runs purely on the
+Python standard library (`lzma`, `zlib`, `struct`, …) — nothing else to
+install.
+
+| Dependency | Required? | Install command |
+|---|---|---|
+| Python 3.8+ | ✅ required | system Python (see below) |
+| `lz4` (LZ4 compression) | ⚪ optional | `uv tool install --with lz4 .` or `pip install lz4` |
+| `zstandard` (ZSTD compression) | ⚪ optional | `uv tool install --with zstandard .` or `pip install zstandard` |
+| `lzo` decoder | ❌ none exists | LZO is detected & reported, but has no pure-Python decoder — clear error, never fabricated output |
+
+The optional packages are only needed **if you repack or analyze images that
+use that compressor**:
+
+```sh
+# both optional compressors in one shot (uv)
+uv tool install --with lz4 --with zstandard ./
+
+# or via pip
+pip install .[lz4,zstd]
+```
+
+If none of your target images use LZ4 or ZSTD, install as-is — the tool works
+fully with zero extra packages.
 
 ---
 
