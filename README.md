@@ -53,12 +53,44 @@ fully with zero extra packages.
 
 ## Installation
 
-There are four ways to use it. Pick one.
+There are five ways to install it. Pick one.
 
-### Option A — `uv tool install` (recommended, isolated)
+### Option A — self-install (no pip/uv/venv needed, recommended)
 
-Installs `sqpack` as a standalone command in its own virtual environment
-(the same way this tool is installed on the author's machine):
+Since v1.13.0 sqpack manages its own installation: it copies the pure-stdlib
+package under `--prefix` and writes a `sqpack` shim, tracked by an uninstall
+manifest. No pip, no uv, no virtualenv, no sudo (default prefix `~/.local`).
+
+```sh
+# from a release tarball or a git clone of this repo
+python3 -m sqfs_repacker.sqpack --install     # or: ./sqpack.py --install
+```
+
+Lifecycle shortcuts:
+
+| Command | Effect |
+|---|---|
+| `sqpack --install` | install / upgrade in place (idempotent) |
+| `sqpack --upgrade` | fetch the latest tarball from GitHub and reinstall |
+| `sqpack --upgrade-url URL` | upgrade from a custom tarball URL or local path |
+| `sqpack --uninstall` | manifest-driven uninstall (removes only what it created) |
+| `sqpack --uninstall --force` | also remove a foreign (non-lifecycle) shim |
+| `sqpack --clean DIR` | list generated extraction artifacts (`*.extracted/`, `squashfs-root*/`, `.sqpack_meta.json`) — dry run |
+| `sqpack --clean DIR --yes` | apply the cleanup |
+| `sqpack ... --prefix DIR` | install location (default `~/.local`) |
+
+A pre-existing non-lifecycle `sqpack` shim (uv/pipx/pip) is never silently
+replaced — it is backed up to `sqpack.pre-lifecycle` first. GitHub-upgrade
+works from the very first self-install:
+
+```sh
+python3 -m sqfs_repacker.sqpack --install   # once
+sqpack --upgrade                            # every later version
+```
+
+### Option B — `uv tool install` (isolated, pre-built venv)
+
+Installs `sqpack` as a standalone command in its own virtual environment:
 
 ```sh
 # from the toolkit directory
@@ -67,15 +99,15 @@ uv tool install ./sqpack_toolkit_v1.0
 # or from anywhere, pointing at the directory
 uv tool install /path/to/sqpack_toolkit_v1.0
 
-# or straight from the built wheel (see Option C)
-uv tool install ./dist/sqfs_repacker-1.12.1-py3-none-any.whl
+# or straight from the built wheel (see Option D)
+uv tool install ./dist/sqfs_repacker-<version>-py3-none-any.whl
 ```
 
 The installed executable is named **`sqpack`**:
 
 ```sh
 $ sqpack --version
-sqpack 1.12.1
+sqpack 1.13.0
 ```
 
 Include optional compressors at install time:
@@ -84,7 +116,7 @@ Include optional compressors at install time:
 uv tool install --with lz4 --with zstandard ./sqpack_toolkit_v1.0
 ```
 
-### Option B — `pip install` (into your current Python environment)
+### Option C — `pip install` (into your current Python environment)
 
 ```sh
 pip install .                      # from inside the toolkit directory
@@ -94,17 +126,17 @@ pip install .[lz4,zstd]            # with optional LZ4/ZSTD support
 
 This also exposes the `sqpack` command.
 
-### Option C — install from the prebuilt distribution files
+### Option D — install from the prebuilt distribution files
 
 `dist/` contains both packaging formats, built from this exact tree:
 
 ```sh
-uv tool install ./dist/sqfs_repacker-1.12.1-py3-none-any.whl   # wheel
-pip install ./dist/sqfs_repacker-1.12.1-py3-none-any.whl
-pip install ./dist/sqfs_repacker-1.12.1.tar.gz                 # sdist
+uv tool install ./dist/sqfs_repacker-<version>-py3-none-any.whl   # wheel
+pip install ./dist/sqfs_repacker-<version>-py3-none-any.whl
+pip install ./dist/sqfs_repacker-<version>.tar.gz                 # sdist
 ```
 
-### Option D — no install at all (standalone launcher)
+### Option E — no install at all (standalone launcher)
 
 The top-level `sqpack.py` is a zero-dependency launcher: it puts the package's
 parent directory on `sys.path` and works from any working directory.
@@ -117,9 +149,10 @@ python3 sqpack.py --version
 ### Verifying the install
 
 ```sh
-sqpack --version                      # → sqpack 1.12.1
-sqpack image.squashfs --analyze       # real image analysis
-sqpack image.squashfs --self-test     # identity round-trip: SHA-256 + size PASS/FAIL
+sqpack --version                      # → sqpack 1.13.0
+sqpack image.squashfs --analyze       # real image analysis (+ anomaly scan)
+sqpack image.squashfs --self-test     # identity round-trip + lifecycle round-trip: PASS/FAIL
+python3 -m unittest tests.test_lifecycle -v   # test suite (from the repo root)
 ```
 
 ---
@@ -145,6 +178,15 @@ sqpack firmware.squashfs --compare patched.squashfs
 
 # Verify byte-fidelity of your whole workflow
 sqpack firmware.squashfs --verify --source-dir rootfs
+
+# Anomaly scan — structural checks run on every --analyze; add a known-good
+# reference to enable bit-rot detection/repair (exit 3 until you pass --yes)
+sqpack firmware.squashfs --analyze
+sqpack firmware.squashfs --analyze --reference known-good.squashfs
+sqpack firmware.squashfs --analyze --reference known-good.squashfs --yes   # → firmware.fixed.squashfs
+
+# Lifecycle
+sqpack --install      # self-install under ~/.local; later updates: sqpack --upgrade
 ```
 
 Run `sqpack --help` for the complete reference.
@@ -156,6 +198,7 @@ Run `sqpack --help` for the complete reference.
 ```
 -a analyze    -R reconstruct   -r repack       -c compare
 -V verify     -t self-test     -d source-dir   -s source
+--install / --uninstall / --upgrade / --clean PATH ...    lifecycle (v1.13.0)
 -p patch      -x extract       -o output       -k keep-temp
 -n analysis-dir -m manifest    -j json         -l log
 -v verbose    -q quiet         -h help
@@ -304,11 +347,25 @@ sqfs_repacker/
   encoder.py, table_builder.py                                 # Phase 3
   repacker.py                                                   # shared rebuild engine (--patch AND --source-dir)
   compare.py                                                    # Phase 4
+  sqfs_anomaly.py                                               # anomaly scan (structural + bit-rot vs --reference)
+  lifecycle.py                                                  # self-install / uninstall / upgrade / clean
 ```
 
 ---
 
 ## Changelog highlights
+
+**v1.13.0 — anomaly engine + lifecycle self-management:**
+- `sqfs_anomaly.py`: structural integrity scan on every `--analyze`
+  (truncation, table offsets, ordering, metadata sanity) plus bit-rot
+  detection/repair against `--reference` — repairable rot fail-fasts with
+  exit 3 unless `--yes`; `--yes` writes `<image>.fixed.squashfs`;
+  `--dry-run` reports only.
+- `--install` / `--uninstall` / `--upgrade` / `--clean PATH`: self-managed
+  install (manifest-driven, stdlib-only, no pip/uv/venv/sudo); foreign shims
+  are backed up to `<name>.pre-lifecycle`, never clobbered.
+- First test suite (`tests/test_lifecycle.py`, 9 unittests) and a lifecycle
+  round-trip inside `--self-test`.
 
 **v1.4+** — directory-based workflow (`sqpack DIR [OUTPUT]` / `-s`), short
 flags, verbose per-phase timing.
