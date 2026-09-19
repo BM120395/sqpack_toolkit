@@ -39,7 +39,7 @@ from .directory_diff import DirectoryDiffError
 from .tree import FilesystemImage
 
 PROG = "sqpack"
-VERSION = "1.12.1"
+VERSION = "1.13.0"
 
 
 # =========================================================================
@@ -63,6 +63,8 @@ SYNOPSIS
         {PROG} IMAGE --compare OTHER [OUTPUT OPTIONS]
         {PROG} IMAGE --verify [--patch IN=LOCAL ...] [--source-dir DIR] [OUTPUT OPTIONS]
         {PROG} IMAGE --self-test
+        {PROG} IMAGE --analyze [--reference KNOWN_GOOD] [--dry-run] [--yes]  [ANOMALY SCAN]
+        {PROG} --install | --uninstall | --upgrade | --clean PATH...   [LIFECYCLE]
         {PROG} -h | --help | ?
 
 SHORT FLAGS (v1.4+)
@@ -511,6 +513,41 @@ def op_analyze(image: str, args, am: ArtifactManager) -> int:
                     f"{report.superblock.compression_name}, {report.superblock.inodes} inodes, "
                     f"{report.file_size} bytes")
         _log(args, report.reproducibility_verdict)
+
+    # Anomaly scan (v1.13.0): SQANOM-2 always; SQANOM-1 when --reference
+    # given. Repairable bit rot fail-fasts (exit 3) with a rerun hint
+    # unless --yes; --yes applies the repair and writes <image>.fixed.bin.
+    from . import sqfs_anomaly
+    ref_name = getattr(args, "reference", None)
+    ref_bytes = None
+    if ref_name:
+        from pathlib import Path as _P
+        ref_path = _P(ref_name).expanduser().resolve()
+        if not ref_path.is_file():
+            print(f"{PROG}: reference image not found: {ref_path}",
+                  file=sys.stderr)
+            return 2
+        ref_bytes = ref_path.read_bytes()
+    data = open(image, "rb").read()
+    findings, repaired = sqfs_anomaly.scan_image(
+        data, reference=ref_bytes, auto_yes=bool(args.yes),
+        dry_run=bool(getattr(args, "dry_run", False)))
+    for f in findings:
+        _log(args, f"[ANOMALY] {f}")
+    repairable = any("BIT ROT [repairable]" in f for f in findings)
+    fatal = any("[fatal]" in f for f in findings)
+    if repaired is not None and not getattr(args, "dry_run", False):
+        out_path = image + ".fixed.squashfs"
+        with open(out_path, "wb") as f:
+            f.write(repaired)
+        _log(args, f"[ANOMALY] repaired image written: {out_path}")
+    if repairable and not args.yes:
+        print(f"{PROG}: repairable bit rot detected vs reference -- "
+              f"re-run with --yes to apply the repair "
+              f"(dry-run report: add --dry-run)", file=sys.stderr)
+        return 3
+    if fatal:
+        return 3
     if args.json:
         with open(args.json, "w") as f:
             f.write(report.to_json())
@@ -824,6 +861,18 @@ def op_self_test(image: str, args, am: ArtifactManager) -> int:
         with open(args.log, "w") as f:
             f.write(repacker_mod.format_forensic_log(stats, image, output))
 
+    # Lifecycle round-trip (v1.13.0): temp prefix only, never touches ~/.local
+    try:
+        from . import lifecycle
+        _ok, _msg = lifecycle.self_test_roundtrip()
+        _log(args, "lifecycle round-trip: %s (%s)"
+             % ("OK" if _ok else "FAIL", _msg))
+        if not _ok:
+            return 1
+    except Exception as e:
+        _log(args, "lifecycle round-trip: FAIL (%s)" % e, level="error")
+        return 1
+
     return 0 if identical else 1
 
 
@@ -876,6 +925,22 @@ def build_parser() -> argparse.ArgumentParser:
     ops.add_argument("--verify", action="store_true")
     ops.add_argument("-t", "--self-test", action="store_true", dest="self_test")
 
+    # Lifecycle (v1.13.0): self-managed install/uninstall/upgrade/clean
+    ops.add_argument("--install", action="store_true", dest="install",
+                     help="Install/upgrade this tool under --prefix "
+                          "(default ~/.local): package copy + shim in "
+                          "<prefix>/bin + uninstall manifest")
+    ops.add_argument("--uninstall", action="store_true", dest="uninstall",
+                     help="Remove a lifecycle install (manifest-driven; "
+                          "cleans the shim from <prefix>/bin)")
+    ops.add_argument("--upgrade", action="store_true", dest="upgrade",
+                     help="Fetch the latest toolkit tarball from the "
+                          "repository and reinstall it")
+    ops.add_argument("--clean", nargs="+", metavar="PATH", dest="clean",
+                     help="List (dry-run) generated extraction artifacts "
+                          "under PATH (<image>.extracted/, squashfs-root*/, "
+                          ".sqpack_meta.json); --yes applies")
+
     # Patch / source-dir / source image
     p.add_argument("-p", "--patch", action="append", metavar="[IN=]LOCAL")
     p.add_argument("-d", "--source-dir", metavar="DIR", dest="source_dir")
@@ -914,7 +979,26 @@ def build_parser() -> argparse.ArgumentParser:
                         "block is regenerated and the COMPRESSOR_OPTIONS "
                         "flag is realigned automatically.")
 
+    # Anomaly scan (v1.13.0)
+    p.add_argument("--reference", metavar="IMAGE", dest="reference",
+                   help="Analyze: known-good image for bit-rot detection/"
+                        "repair (SQANOM-1); repairable rot fail-fasts with "
+                        "exit 3 unless --yes")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Analyze with --reference: report only, write no "
+                        "repaired image")
+
     # Logging / misc
+    p.add_argument("--yes", action="store_true",
+                   help="Lifecycle/uninstall: skip interactive confirmation")
+    p.add_argument("--force", action="store_true",
+                   help="Lifecycle: overwrite/replace even when the existing "
+                        "shim or target is not lifecycle-managed")
+    p.add_argument("--prefix", metavar="DIR",
+                   help="Lifecycle: install prefix (default ~/.local)")
+    p.add_argument("--upgrade-url", dest="upgrade_url", metavar="URL",
+                   help="Upgrade: tarball URL or local tarball path "
+                        "(default: repository default branch)")
     p.add_argument("-V", "--verbose", action="count", default=0, dest="verbose",
                    help="Increase verbosity (repeat for more: -VV)")
     p.add_argument("--diff-detail", type=int, nargs="?", const=10, default=None,
@@ -939,6 +1023,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.version:
         print(f"{PROG} {VERSION}")
         return 0
+
+    # Lifecycle operations (v1.13.0) -- run BEFORE the image-required check:
+    # install/uninstall/upgrade/clean never take an IMAGE argument.
+    if getattr(args, "install", False) or getattr(args, "uninstall", False) \
+            or getattr(args, "upgrade", False) or getattr(args, "clean", None):
+        from . import lifecycle
+        if args.install:
+            return lifecycle.op_install(args)
+        if args.uninstall:
+            return lifecycle.op_uninstall(args)
+        if args.upgrade:
+            return lifecycle.op_upgrade(args)
+        return lifecycle.op_clean(args)
 
     # Detect mksquashfs-style positional form: sqpack DIR [OUTPUT]
     # Detected when: args.image is a directory (not a .squashfs file),

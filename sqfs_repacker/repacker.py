@@ -478,7 +478,7 @@ def _build_profile_for_compression(comp_id: int, block_size: int,
         return CompressorProfile(comp_id=1)
     if comp_id == 2:  # legacy LZMA
         # PRESERVE the source image's detected framing verbatim. The original
-        # XC220-G3v image, for instance, uses squashfs-tools' "compat13" framing
+        # Certain source images, for instance, use squashfs-tools' "compat13" framing
         # (5-byte LZMA_alone header + 8-byte uncompressed_size trailer) -- the
         # legacy "vendor5" framing (5-byte header only) does NOT round-trip on
         # such images: the fragment block's 13-byte compat13 trailer is required

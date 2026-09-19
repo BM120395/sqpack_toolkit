@@ -208,7 +208,7 @@ def _walk_inode_table(data: bytes, inode_table_start: int, inode_count: int,
                         # pass it. For now, assume we read the rest of the block.
                         # Actually we should call this from a context that knows.
                         # Defer: read just the next 16 bytes and hope block_size count is small
-                        # For TP-Link images, single block.
+                        # Some vendor images pack single blocks here.
                         n_blocks = 1  # TODO: caller must fill this
                         inode_size = 16 + 16 + n_blocks * 4
                 else:

@@ -1,5 +1,10 @@
 # sqpack — Deterministic SquashFS Analysis, Extraction & Repacking Toolkit
 
+> **New: `case_studies/`** — a real-world SquashFS v4/xz-on-UBI rootfs
+> recovery as a documented case study with a self-contained diagnostics module
+> (`sqfs_repacker/case_studies/`). Read-only reference code for future
+> releases; not wired into any CLI operation. See `case_studies/README.md`.
+
 A complete Python toolkit for working with SquashFS 4.x firmware images:
 deep read-only **analysis**, metadata-exact **extraction**, deterministic
 **repacking** (only changed files are recompressed — everything else is reused

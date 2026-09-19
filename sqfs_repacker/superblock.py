@@ -128,7 +128,7 @@ class Superblock:
                 self.trailing_bytes = self.file_size_on_disk - self.bytes_used
                 findings.append(
                     f"{self.trailing_bytes} trailing byte(s) after bytes_used "
-                    f"(padding, or appended vendor data e.g. TP-Link/dd images "
+                    f"(padding, or appended vendor data e.g. dd-style images "
                     f"often pad to an eraseblock or MTD partition boundary)"
                 )
         return findings

@@ -40,7 +40,7 @@ Example (library use, no CLI):
     new_bytes, stats = Repacker(fs).build({"/etc/issue": b"patched\\n"})
 """
 
-__version__ = "1.12.1"
+__version__ = "1.13.0"
 
 from .analyzer import analyze, AnalysisReport
 from .reconstruct import ReconstructionReport
