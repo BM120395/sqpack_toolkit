@@ -30,6 +30,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -50,8 +51,8 @@ CLEAN_DIR_GLOBS: Tuple[str, ...] = ("*.extracted", "squashfs-root*",
 # Sibling dirs implied by a cleaned image file: <stem>.extracted etc.
 CLEAN_FILE_SUFFIXES: Tuple[str, ...] = (".extracted",)
 CLEAN_SIDECAR = ".sqpack_meta.json"
-DEFAULT_UPGRADE_URL = ("https://codeload.github.com/BM120395/"
-                       "sqpack_toolkit_v1.0/tar.gz/HEAD")
+DEFAULT_UPGRADE_URL = ("https://github.com/BM120395/"
+                       "sqpack_toolkit_v1.0/tarball/HEAD")
 MANIFEST_NAME = ".install_manifest.json"
 SHIM_MARKER = f"# managed by {TOOL_NAME} lifecycle"
 
@@ -308,12 +309,39 @@ def op_uninstall(args) -> int:
 # ---------------------------------------------------------------------------
 # upgrade
 # ---------------------------------------------------------------------------
+def _gh_token() -> Optional[str]:
+    """Auth token for private-repo tarball downloads.
+
+    Order: SQPACK_GH_TOKEN env, GH_TOKEN/GITHUB_TOKEN env, then the local
+    gh CLI keyring (never printed). None -> anonymous download.
+    """
+    for var in ("SQPACK_GH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+        tok = os.environ.get(var)
+        if tok:
+            return tok.strip()
+    gh = shutil.which("gh")
+    if gh:
+        try:
+            r = subprocess.run([gh, "auth", "token"], capture_output=True,
+                               text=True, timeout=15)
+            tok = (r.stdout or "").strip()
+            if r.returncode == 0 and tok:
+                return tok
+        except OSError:
+            pass
+    return None
+
+
 def _fetch_tarball(url: str, dest: str) -> None:
     if os.path.exists(url):  # local tarball path (also how tests avoid net)
         shutil.copyfile(url, dest)
         return
-    req = urllib.request.Request(
-        url, headers={"User-Agent": f"{TOOL_NAME}-lifecycle"})
+    headers = {"User-Agent": f"{TOOL_NAME}-lifecycle"}
+    if "github.com" in url or "codeload.github.com" in url:
+        tok = _gh_token()
+        if tok:
+            headers["Authorization"] = f"token {tok}"
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=60) as r, \
             open(dest, "wb") as f:
         shutil.copyfileobj(r, f)
