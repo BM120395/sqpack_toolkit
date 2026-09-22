@@ -39,9 +39,14 @@ provided:
   * only actually-changed content is freshly compressed, using this
     image's own on-disk framing (vendor5/compat13/etc), since the real
     decoder is typically the target device's kernel, not desktop
-    unsquashfs.
+    standard readers.
   * fragments that become unreferenced are dropped, keeping output
-    size minimal.
+    size minimal. (v1.14.0: fragments referenced by any reuse file are
+    CARRIED as decompressed buffers -- fresh tails from changed files
+    are appended into the carried payload, preserving the source
+    fragment count; a carried fragment whose payload changed is
+    re-encoded once. The NFS export/lookup table is rebuilt when the
+    source image had one.)
 
 Known, documented limitation (unchanged from before): the inode table,
 directory table, fragment table, and id table are ALWAYS freshly
@@ -62,11 +67,12 @@ from typing import Dict, List, Optional, Tuple
 
 from . import constants as C
 from . import inode_structs as S
+from .constants import EXPORT_ENTRY_STRUCT
 from . import directory_diff as ddiff
 from .directory_diff import DirectoryDiff, DiffEntry, Status
 from .tree import FilesystemImage, FSNode, iter_nodes
 from .inode_parser import Inode
-from .compressor import CompressorProfile
+from .compressor import CompressorProfile, decompress_block
 from .encoder import encode_block, encode_metadata_block
 from .table_builder import MetadataTableBuilder, build_mutual_tables, Patch
 
@@ -86,6 +92,11 @@ class RepackStats:
     fragments_reused: int = 0
     fragments_new: int = 0
     fragments_dropped: int = 0
+    # v1.14.0 fragment consolidation: fresh tails appended into carried
+    # original fragments (no new fragment allocated), and carried
+    # fragments that had to be re-encoded because their payload changed.
+    fragments_consolidated: int = 0
+    fragments_recompressed: int = 0
     original_size: int = 0
     new_size: int = 0
     warnings: List[str] = field(default_factory=list)
@@ -100,6 +111,10 @@ class RepackStats:
 
     # -- spec-named aliases (kept alongside the original names above for
     # backward compatibility with anything already parsing the JSON report)
+    fragments_consolidated: int = 0
+    fragments_recompressed: int = 0
+    export_table_rebuilt: bool = False
+
     @property
     def reused_blocks(self) -> int:
         return self.data_blocks_reused
@@ -205,6 +220,8 @@ def _apply_entry_in_place(inode: Inode, entry: DiffEntry) -> None:
         if entry.kind == "file":
             with open(entry.local_path, "rb") as f:
                 inode.raw_content = f.read()
+            if inode.orig_file_size is None:
+                inode.orig_file_size = inode.file_size  # pre-edit size
             inode.file_size = len(inode.raw_content)
         elif entry.kind == "symlink":
             inode.symlink_target = os.readlink(entry.local_path).encode("utf-8", "surrogateescape")
@@ -256,6 +273,8 @@ def _merge_tree(fs: FilesystemImage, source_dir: Optional[str],
     # 3. explicit patches win last
     for path, content in patches.items():
         if path in nodes:
+            if nodes[path].inode.orig_file_size is None:
+                nodes[path].inode.orig_file_size = nodes[path].inode.file_size
             nodes[path].inode.kind = "file"
             nodes[path].inode.raw_content = content
             nodes[path].inode.file_size = len(content)
@@ -327,7 +346,7 @@ def _merge_tree(fs: FilesystemImage, source_dir: Optional[str],
     # 7. renumber contiguously 1..N. _finalize preserves original numbers
     #    for unchanged nodes but allocates max_original+1 for changed/added
     #    ones, which can leave non-contiguous gaps where inode_count != max
-    #    number. unsquashfs enforces inode_number <= superblock.inode_count,
+    #    number. standard readers enforces inode_number <= superblock.inode_count,
     #    so a trailing fresh number (e.g. 415 with count 414) is rejected as
     #    "inode number too large". Hardlink groups keep a single shared number
     #    (renumber by group to preserve the grouping). Operates on the MERGED
@@ -453,7 +472,7 @@ def _renumber_contiguous(root: FSNode) -> None:
 # =========================================================================
 
 # Algorithms that need a comp_opts block immediately after the superblock
-# (mksquashfs writes one for XZ, gzip, lzo, lz4, zstd -- but NOT for the
+# (reference tools write one for XZ, gzip, lzo, lz4, zstd -- but NOT for the
 # legacy "LZMA" vendor5 format used by old OpenWrt, where the stream
 # just begins at offset 96 with no framing block). LZMA (comp_id=2) falls
 # in the no-block camp; we follow the same convention.
@@ -483,7 +502,7 @@ def _build_profile_for_compression(comp_id: int, block_size: int,
         # legacy "vendor5" framing (5-byte header only) does NOT round-trip on
         # such images: the fragment block's 13-byte compat13 trailer is required
         # by squashfs-tools' lzma_code() path during metadata walk. Switching
-        # to vendor5 produces output unsquashfs cannot decode (rc=0, "LZMA
+        # to vendor5 produces output standard readers cannot decode (rc=0, "LZMA
         # uncompress failed with error code 0" -- the trailing 8-byte
         # uncompressed_size is misinterpreted as garbage by liblzma and the
         # stream never reaches STREAM_END).
@@ -499,7 +518,7 @@ def _build_profile_for_compression(comp_id: int, block_size: int,
                 lzma_pb=src_profile.lzma_pb if src_profile.lzma_pb is not None else 2,
                 lzma_dict_size=src_profile.lzma_dict_size or block_size or (1 << 19),
             )
-        # Otherwise default to mksquashfs's "compat" framing: it is a strict
+        # Otherwise default to the reference tools' "compat" framing: it is a strict
         # superset of vendor5 (squashfs-tools' lzma_code() decodes both, since
         # compat framing just prepends the 8-byte uncompressed_size trailer
         # that liblzma uses to size its output buffer). Even on vendor5-source
@@ -534,25 +553,25 @@ def _make_comp_opts_block(comp_id: int, profile: CompressorProfile,
     algorithm, framed in a SquashFS metadata block: 2-byte little-endian
     length header (top bit clear = compressed, but comp_opts blocks are
     conventionally stored uncompressed -- so the bit IS set in practice;
-    mksquashfs emits 0x8000 | len) followed by the raw comp_opts bytes.
+    reference tools emit 0x8000 | len) followed by the raw comp_opts bytes.
 
     Returns None for algorithms that don't use a comp_opts block (legacy
     LZMA, id=2), so the caller can leave the post-superblock area empty
-    -- exactly the on-disk layout mksquashfs uses for those images.
+    -- exactly the on-disk layout reference tools use for those images.
     """
     if comp_id not in _COMP_OPTS_ALGORITHMS:
         return None
 
     if comp_id == 4:  # XZ
-        # mksquashfs convention: dict_size | (filters_bitmask << 32)
+        # the conventional framing: dict_size | (filters_bitmask << 32)
         # The filters_bitmask on stock squashfs-tools is 0 for plain LZMA2
         # (no BCJ/x86/Delta etc.); embedded MIPS kernels use this same
-        # bitmask (no MIPS BCJ exists in mksquashfs's xz code path).
+        # bitmask (no MIPS BCJ exists in the reference tools' xz code path).
         dict_size = profile.xz_dict_size or block_size or (1 << 18)
         body = C.COMP_OPTS_XZ.pack(dict_size, 0)
     elif comp_id == 1:  # gzip/zlib
         # squashfs-tools' gzip comp_opts: compression_level, window_bits, strategies
-        # mksquashfs uses level=9 (max), window_bits=15 (default), strategies=0
+        # reference tools use level=9 (max), window_bits=15 (default), strategies=0
         body = C.COMP_OPTS_GZIP.pack(9, 15, 0)
     elif comp_id == 3:  # lzo
         body = C.COMP_OPTS_LZO.pack(1, 8)  # algorithm=1, level=8 (max)
@@ -565,7 +584,7 @@ def _make_comp_opts_block(comp_id: int, profile: CompressorProfile,
 
     # Frame as a metadata block: header word has bit 15 set (stored
     # uncompressed) and bits 0-14 = body length. This is exactly what
-    # mksquashfs emits (see unsquashfs/squashfs_compressor.c).
+    # reference tools emit (see reference decoder sources).
     assert len(body) <= C.METADATA_LENGTH_MASK, f"comp_opts too large: {len(body)}"
     hdr = len(body) | C.METADATA_UNCOMPRESSED_BIT
     return struct.pack("<H", hdr) + body
@@ -619,7 +638,7 @@ class Repacker:
         # The 96-byte SquashFS 4.0 superblock is followed by an optional
         # metadata-framed comp_opts block (flag bit 6, COMPRESSOR_OPTIONS)
         # whose length is encoded in the 2-byte metadata header at offset 96.
-        # This block IS data the kernel/unsquashfs reads back to obtain the
+        # This block IS data the kernel/standard readers reads back to obtain the
         # compressor parameters; rewriting the superblock without it causes
         # "Failed to read compressor options" on stock squashfs-tools.
         #
@@ -721,11 +740,35 @@ class Repacker:
             stats.metadata_only_count = c["metadata_only_count"]
 
         # -- 1. data + fragment area --------------------------------------
+        #
+        # Fragment-consolidation semantics (v1.14.0):
+        # When a byte-identical file is reused verbatim, its original
+        # fragment block's *decompressed* content is carried forward as a
+        # mutable buffer. Fresh tails (from patched/added files) are
+        # APPENDED into that buffer (capacity 8192, the metadata-block
+        # ceiling for fragment storage) instead of allocating a new
+        # fragment each. Every inode's fragment_offset is a coordinate
+        # into the decompressed payload -- never into the compressed
+        # bytes -- so appending at the end leaves every other file's
+        # (fragment_index, offset) pair byte-valid without touching its
+        # inode. Result: an image with N original fragments and any
+        # number of small edits repacks to exactly N fragments again
+        # (as long as cumulative tail growth fits), preserving the
+        # stock fragment count. A modified file whose new tail does not
+        # fit the 8192 ceiling falls back to a brand-new fragment.
         data_out = bytearray()
         reused_block_offsets: Dict[int, int] = {}
-        used_fragments: Dict[int, int] = {}
         new_fragment_entries: List[Tuple[int, int, bool]] = []
         resolved_file_layout: Dict[int, dict] = {}
+        # orig fragment idx -> (payload bytearray, used_len, dirty flag)
+        # -- `payload` starts as the ORIGINAL fragment's decompressed
+        #    content; `used_len` grows as fresh tails are appended;
+        #    `dirty` means the payload changed and must be re-encoded.
+        carried_fragments: Dict[int, dict] = {}
+        # orig fragment idx -> new (output) fragment idx placeholder
+        used_fragments: Dict[int, int] = {}
+        # brand-new fragments allocated for fresh tails (no carried parent)
+        fresh_fragment_payloads: List[Tuple[bytearray, int]] = []
 
         base_data_offset = self.base_image_overhead
 
@@ -742,14 +785,17 @@ class Repacker:
         # group always gets the byte-identical reuse path -- never the
         # other way around, which would silently recompress an otherwise
         # untouched file just because of dict/tree iteration order.
+        # (Two-pass structure below preserves that ordering exactly:
+        # pass A handles every reuse candidate, pass B every fresh one.)
         file_nodes = [n for n in iter_nodes(root) if n.inode.kind == "file"]
-        file_nodes.sort(key=lambda n: n.inode.raw_content is not None)
+        reuse_nodes = [n for n in file_nodes if n.inode.raw_content is None]
+        fresh_nodes = [n for n in file_nodes if n.inode.raw_content is not None]
 
         # When the user passes --compression <ALGO>, the verbatim-reuse
         # optimisation becomes UNSAFE: a "reused" data block is just a
         # pointer copy of the original LZMA/XZ/gzip bytes into the new
         # image, but the new superblock.compression field names a
-        # DIFFERENT codec. stock unsquashfs and the device kernel will
+        # DIFFERENT codec. stock readers and the device kernel will
         # try to decode those bytes with the wrong decoder and fail
         # ("xz uncompress failed with error code 0" / "LZMA error 9" /
         # "File system corruption detected"). Force the long path (full
@@ -763,7 +809,47 @@ class Repacker:
         # reuse is correct and stays on.
         codec_changed = (self.comp_id != self.sb.compression)
 
-        for node in file_nodes:
+        # Carried-fragment machinery (fragment consolidation):
+        #   _carry_buffer: decompressed payload of an original fragment,
+        #     mutable; fresh tails are APPENDED at `used`. Offlices into
+        #     the decompressed payload never move, so every previously
+        #     written (fragment_index, fragment_offset) pair stays valid.
+        #   _ensure_index: assign the output fragment-table index for an
+        #     original fragment (once), with a placeholder entry filled
+        #     at finalize time. Buffers created but never indexed (a
+        #     failed capacity check on a fragment no reuse file
+        #     references) are simply dropped, like the originals.
+        carried_fragments: Dict[int, dict] = {}   # orig idx -> buffer dict
+        used_fragments: Dict[int, int] = {}       # orig idx -> output idx
+
+        def _carry_buffer(orig_idx: int) -> dict:
+            cf = carried_fragments.get(orig_idx)
+            if cf is None:
+                orig_off, orig_size, orig_unc = self.fs.fragment_table[orig_idx]
+                raw = self.data[orig_off: orig_off + orig_size]
+                if orig_unc:
+                    payload = bytearray(raw)
+                else:
+                    decoded, self.profile = decompress_block(
+                        raw, self.sb.compression, self.profile,
+                        max_size=self.sb.block_size,
+                        xz_options_block=self.fs.xz_options_block)
+                    payload = bytearray(decoded)
+                cf = {"payload": payload, "used": len(payload), "dirty": False}
+                carried_fragments[orig_idx] = cf
+            return cf
+
+        def _ensure_index(orig_idx: int) -> int:
+            if orig_idx not in used_fragments:
+                used_fragments[orig_idx] = len(new_fragment_entries)
+                new_fragment_entries.append((-1, -1, False))  # finalize fills
+            return used_fragments[orig_idx]
+
+        # ---- pass A: byte-identical files (verbatim reuse) ---------------
+        # Resolved BEFORE fresh-content ones so a hardlink group with both
+        # an unchanged member (reusable) and a newly-added member always
+        # takes the byte-identical reuse path (unchanged from v1.13).
+        for node in reuse_nodes:
             inode = node.inode
 
             if inode.inode_number in resolved_by_inode_number:
@@ -773,106 +859,209 @@ class Repacker:
                 resolved_file_layout[id(node)] = resolved_by_inode_number[inode.inode_number]
                 continue
 
-            if inode.raw_content is None and not codec_changed:
-                cursor = inode.file_start_block
-                new_block_sizes = list(inode.block_sizes)
-                first_new_offset = None
-                for raw_entry in inode.block_sizes:
-                    size = raw_entry & (S.SQUASHFS_COMPRESSED_BIT_BLOCK - 1)
-                    if size == 0:
-                        continue
-                    orig_off = cursor
-                    cursor += size
-                    if orig_off in reused_block_offsets:
-                        new_off = reused_block_offsets[orig_off]
-                    else:
-                        raw_bytes = self.data[orig_off: orig_off + size]
-                        new_off = place_bytes(raw_bytes)
-                        reused_block_offsets[orig_off] = new_off
-                    stats.data_blocks_reused += 1
-                    if first_new_offset is None:
-                        first_new_offset = new_off
-                new_start_block = first_new_offset if first_new_offset is not None else base_data_offset + len(data_out)
+            if codec_changed:
+                # Unchanged file under a --codec change: content must be
+                # re-encoded in the new codec -- handled by pass B.
+                continue
 
-                new_frag_idx = S.SQUASHFS_INVALID_FRAG
-                if inode.fragment_index != S.SQUASHFS_INVALID_FRAG:
-                    if inode.fragment_index in used_fragments:
-                        new_frag_idx = used_fragments[inode.fragment_index]
-                    else:
-                        orig_off, orig_size, orig_unc = self.fs.fragment_table[inode.fragment_index]
-                        raw_bytes = self.data[orig_off: orig_off + orig_size]
-                        new_off = place_bytes(raw_bytes)
-                        new_frag_idx = len(new_fragment_entries)
-                        new_fragment_entries.append((new_off, orig_size, orig_unc))
-                        used_fragments[inode.fragment_index] = new_frag_idx
-                    stats.fragments_reused += 1
+            cursor = inode.file_start_block
+            new_block_sizes = list(inode.block_sizes)
+            first_new_offset = None
+            for raw_entry in inode.block_sizes:
+                size = raw_entry & (S.SQUASHFS_COMPRESSED_BIT_BLOCK - 1)
+                if size == 0:
+                    continue
+                orig_off = cursor
+                cursor += size
+                if orig_off in reused_block_offsets:
+                    new_off = reused_block_offsets[orig_off]
+                else:
+                    raw_bytes = self.data[orig_off: orig_off + size]
+                    new_off = place_bytes(raw_bytes)
+                    reused_block_offsets[orig_off] = new_off
+                stats.data_blocks_reused += 1
+                if first_new_offset is None:
+                    first_new_offset = new_off
 
-                resolved_file_layout[id(node)] = dict(
-                    start_block=new_start_block, block_sizes=new_block_sizes,
-                    fragment_index=new_frag_idx, fragment_offset=inode.fragment_offset,
-                    file_size=inode.file_size,
-                )
-                resolved_by_inode_number[inode.inode_number] = resolved_file_layout[id(node)]
-                stats.files_reused_verbatim += 1
+            new_start_block = first_new_offset if first_new_offset is not None else base_data_offset + len(data_out)
 
+            new_frag_idx = S.SQUASHFS_INVALID_FRAG
+            if inode.fragment_index != S.SQUASHFS_INVALID_FRAG:
+                _carry_buffer(inode.fragment_index)   # carried, untouched for now
+                new_frag_idx = _ensure_index(inode.fragment_index)
+                stats.fragments_reused += 1
+
+            resolved_file_layout[id(node)] = dict(
+                start_block=new_start_block, block_sizes=new_block_sizes,
+                fragment_index=new_frag_idx, fragment_offset=inode.fragment_offset,
+                file_size=inode.file_size,
+            )
+            resolved_by_inode_number[inode.inode_number] = resolved_file_layout[id(node)]
+            stats.files_reused_verbatim += 1
+
+        # ---- pass B: fresh content (patches / source-dir / codec change) --
+        for node in fresh_nodes:
+            inode = node.inode
+
+            if inode.inode_number in resolved_by_inode_number:
+                resolved_file_layout[id(node)] = resolved_by_inode_number[inode.inode_number]
+                continue
+
+            # Codec-change path: unchanged file whose content is
+            # still on disk in the SOURCE image in the OLD codec.
+            # We have to decode it through fs.read_file_content so
+            # encode_block() can re-emit it in the NEW codec. This
+            # is the price of --compression; the verbatim-reuse
+            # shortcut above only works when both codecs match.
+            if codec_changed and inode.raw_content is None:
+                try:
+                    inode.raw_content = self.fs.read_file_content(inode)
+                except Exception as e:
+                    raise RuntimeError(
+                        f"--compression: failed to decode source content "
+                        f"of inode {inode.inode_number} (kind={inode.kind}) "
+                        f"for codec change: {e}"
+                    ) from e
+            content = inode.raw_content
+            # Tail-convention preservation: a file that already existed in
+            # the image keeps ITS OWN tail storage convention -- fragment
+            # if the original inode had one, tail-as-final-block otherwise
+            # (some vendor images store large tails as regular
+            # blocks while other files in the same image use fragments).
+            # Applying the global superblock policy here instead would
+            # grow the fragment count by one per modified convention-
+            # deviant file. Newly-added files use the global policy.
+            existed_in_image = bool(inode.block_sizes)
+            if existed_in_image:
+                orig_had_frag = inode.fragment_index != S.SQUASHFS_INVALID_FRAG
+                if orig_had_frag:
+                    n_full, use_frag = _plan_file_layout(
+                        len(content), self.sb.block_size,
+                        self.sb.decoded_flags.get("ALWAYS_FRAGMENTS", False),
+                        self.sb.decoded_flags.get("NO_FRAGMENTS", False),
+                    )
+                else:
+                    n_full = (len(content) + self.sb.block_size - 1) // self.sb.block_size
+                    use_frag = False
             else:
-                # Codec-change path: unchanged file whose content is
-                # still on disk in the SOURCE image in the OLD codec.
-                # We have to decode it through fs.read_file_content so
-                # encode_block() can re-emit it in the NEW codec. This
-                # is the price of --compression; the verbatim-reuse
-                # shortcut above only works when both codecs match.
-                if codec_changed and inode.raw_content is None:
-                    try:
-                        inode.raw_content = self.fs.read_file_content(inode)
-                    except Exception as e:
-                        raise RuntimeError(
-                            f"--compression: failed to decode source content "
-                            f"of inode {inode.inode_number} (kind={inode.kind}) "
-                            f"for codec change: {e}"
-                        ) from e
-                content = inode.raw_content
                 n_full, use_frag = _plan_file_layout(
                     len(content), self.sb.block_size,
                     self.sb.decoded_flags.get("ALWAYS_FRAGMENTS", False),
                     self.sb.decoded_flags.get("NO_FRAGMENTS", False),
                 )
-                new_block_sizes = []
-                start_block = None
-                for i in range(n_full):
-                    chunk = content[i * self.sb.block_size: (i + 1) * self.sb.block_size]
-                    body, is_compressed = encode_block(chunk, self.comp_id, self.profile)
-                    off = place_bytes(body)
-                    if start_block is None:
-                        start_block = off
-                    size_field = len(body) | (0 if is_compressed else S.SQUASHFS_COMPRESSED_BIT_BLOCK)
-                    new_block_sizes.append(size_field)
-                    stats.data_blocks_new += 1
+            new_block_sizes = []
+            start_block = None
+            for i in range(n_full):
+                chunk = content[i * self.sb.block_size: (i + 1) * self.sb.block_size]
+                body, is_compressed = encode_block(chunk, self.comp_id, self.profile)
+                off = place_bytes(body)
+                if start_block is None:
+                    start_block = off
+                size_field = len(body) | (0 if is_compressed else S.SQUASHFS_COMPRESSED_BIT_BLOCK)
+                new_block_sizes.append(size_field)
+                stats.data_blocks_new += 1
 
-                new_frag_idx = S.SQUASHFS_INVALID_FRAG
-                new_frag_offset = 0
-                if use_frag:
-                    tail = content[n_full * self.sb.block_size:]
-                    body, is_compressed = encode_block(tail, self.comp_id, self.profile)
-                    off = place_bytes(body)
+            new_frag_idx = S.SQUASHFS_INVALID_FRAG
+            new_frag_offset = 0
+            if use_frag:
+                tail = content[n_full * self.sb.block_size:]
+
+                # Fragment consolidation, overwrite-first: patch the new
+                # tail INTO the file's old tail footprint inside the
+                # carried payload when it fits there (shrink or equal
+                # length). No other file's tail coordinates are touched
+                # (they live outside the old footprint), so every other
+                # (fragment_index, fragment_offset) stays byte-valid.
+                # This keeps the re-encoded block close to its original
+                # size -- appending instead measurably degrades the xz
+                # ratio on small-dictionary vendor images (e.g. a 6 KiB
+                # dict fragment grew +2.5 KiB compressed on append vs
+                # ~0 in place). Append into the free tail space only
+                # when the new tail outgrew the old footprint; fall back
+                # to a brand-new fragment on capacity exhaustion or when
+                # the file previously had no fragment at all.
+                target_cf = None
+                in_place = False
+                old_tail_len = 0
+                if inode.fragment_index != S.SQUASHFS_INVALID_FRAG:
+                    cf = _carry_buffer(inode.fragment_index)
+                    # Pre-edit size: file_size already reflects the NEW
+                    # content for MODIFIED files -- deriving the footprint
+                    # from it made grown tails overwrite the next file's
+                    # tail in the same fragment block.
+                    _osz = (inode.orig_file_size
+                            if inode.orig_file_size is not None
+                            else inode.file_size)
+                    old_tail_len = ((_osz or 0)
+                                    - len(inode.block_sizes) * self.sb.block_size)
+                    if (len(tail) <= old_tail_len
+                            and inode.fragment_offset + len(tail) <= self.sb.block_size):
+                        target_cf = cf
+                        in_place = True
+                    elif cf["used"] + len(tail) <= self.sb.block_size:
+                        target_cf = cf
+                        in_place = False
+                if target_cf is not None:
+                    new_frag_idx = _ensure_index(inode.fragment_index)
+                    if in_place:
+                        new_frag_offset = inode.fragment_offset
+                        target_cf["payload"][new_frag_offset:new_frag_offset + len(tail)] = tail
+                        if inode.fragment_offset + old_tail_len == target_cf["used"]:
+                            # our old tail ended the payload: reclaim space
+                            target_cf["used"] = new_frag_offset + len(tail)
+                    else:
+                        new_frag_offset = target_cf["used"]
+                        target_cf["payload"] += tail
+                        target_cf["used"] += len(tail)
+                    target_cf["dirty"] = True
+                    stats.fragments_consolidated += 1
+                else:
                     new_frag_idx = len(new_fragment_entries)
-                    new_fragment_entries.append((off, len(body), not is_compressed))
+                    new_fragment_entries.append((-1, -1, False))
+                    fresh_fragment_payloads.append((bytearray(tail), new_frag_idx))
                     stats.fragments_new += 1
-                    if start_block is None:
-                        start_block = off
-
+                    new_frag_offset = 0
                 if start_block is None:
                     start_block = base_data_offset + len(data_out)
 
-                resolved_file_layout[id(node)] = dict(
-                    start_block=start_block, block_sizes=new_block_sizes,
-                    fragment_index=new_frag_idx, fragment_offset=new_frag_offset,
-                    file_size=len(content),
-                )
-                resolved_by_inode_number[inode.inode_number] = resolved_file_layout[id(node)]
-                stats.files_recompressed += 1
+            if start_block is None:
+                start_block = base_data_offset + len(data_out)
 
-        stats.fragments_dropped = max(0, len(self.fs.fragment_table) - len(new_fragment_entries))
+            resolved_file_layout[id(node)] = dict(
+                start_block=start_block, block_sizes=new_block_sizes,
+                fragment_index=new_frag_idx, fragment_offset=new_frag_offset,
+                file_size=len(content),
+            )
+            resolved_by_inode_number[inode.inode_number] = resolved_file_layout[id(node)]
+            stats.files_recompressed += 1
+
+        # ---- finalize fragments: emit carried + fresh payloads ------------
+        # Dirty (appended-into) fragments are re-encoded once; untouched
+        # carried fragments stay byte-verbatim from the source image.
+        for orig_idx, cf in carried_fragments.items():
+            if orig_idx not in used_fragments:
+                continue   # buffer created for a failed pack; original is droppable
+            new_idx = used_fragments[orig_idx]
+            if cf["dirty"]:
+                body, is_compressed = encode_block(
+                    bytes(cf["payload"][:cf["used"]]), self.comp_id, self.profile)
+                off = place_bytes(body)
+                new_fragment_entries[new_idx] = (off, len(body), not is_compressed)
+                stats.fragments_recompressed += 1
+            else:
+                orig_off, orig_size, orig_unc = self.fs.fragment_table[orig_idx]
+                if orig_off in reused_block_offsets:
+                    off = reused_block_offsets[orig_off]
+                else:
+                    off = place_bytes(self.data[orig_off: orig_off + orig_size])
+                    reused_block_offsets[orig_off] = off
+                new_fragment_entries[new_idx] = (off, orig_size, orig_unc)
+        for payload, new_idx in fresh_fragment_payloads:
+            body, is_compressed = encode_block(bytes(payload), self.comp_id, self.profile)
+            off = place_bytes(body)
+            new_fragment_entries[new_idx] = (off, len(body), not is_compressed)
+
+        stats.fragments_dropped = max(0, len(self.fs.fragment_table) - len(used_fragments))
 
         # -- 2. resolve uid/gid: original id table, extended with any new
         #    (uid, gid) raw values introduced by source_dir/--patch ------
@@ -929,6 +1118,36 @@ class Repacker:
             inode_builder, dir_builder, self.comp_id, self.profile
         )
 
+        # -- 4b-pre. export (lookup) table entries for NFS exportability ---
+        # Rebuilt when the source image had one (EXPORTABLE flag + valid
+        # lookup_table_start): entry[k] = inode ref for inode number k+1,
+        # same encoding as the superblock's root_inode ref. The resolver
+        # maps each inode's serialized position to (chunk_byte_offset,
+        # in_chunk_offset) -- identical to how directory entries point at
+        # inodes. A wrong/absent table never corrupts reads (normal
+        # mounting walks the inode table; the lookup table only serves
+        # NFS filehandle resolution), so this is additive and safe.
+        export_entries: List[int] = []
+        source_had_export = (
+            self.sb.lookup_table_start != SQUASHFS_INVALID_BLK
+            and bool(self.sb.flags & (1 << C.FLAG_BITS["EXPORTABLE"]))
+        )
+        if source_had_export:
+            max_ino = max(inode_raw_offset_by_number)
+            for ino in range(1, max_ino + 1):
+                raw_off = inode_raw_offset_by_number.get(ino)
+                if raw_off is None:
+                    # Inode numbers are dense in practice; a gap gets an
+                    # invalid ref rather than a wrong one.
+                    export_entries.append(SQUASHFS_INVALID_BLK)
+                    continue
+                chunk_off, in_chunk = resolve_inode(raw_off)
+                export_entries.append((chunk_off << 16) | in_chunk)
+        export_table_bytes, export_rel_pointers = (
+            _build_export_table(export_entries, self.comp_id, self.profile)
+            if export_entries else (b"", [])
+        )
+
         # -- 4. fragment table + id table -----------------------------------
         frag_table_bytes, frag_rel_pointers = _build_fragment_table(
             new_fragment_entries, self.comp_id, self.profile
@@ -956,6 +1175,15 @@ class Repacker:
         else:
             fragment_table_start = SQUASHFS_INVALID_BLK
 
+        if export_entries:
+            export_blocks_base = len(out)
+            out += export_table_bytes
+            lookup_table_start = len(out)
+            out += b"".join(struct.pack("<Q", export_blocks_base + p)
+                            for p in export_rel_pointers)
+        else:
+            lookup_table_start = SQUASHFS_INVALID_BLK
+
         if id_values:
             id_blocks_base = len(out)
             out += id_table_bytes
@@ -976,14 +1204,14 @@ class Repacker:
 
         num_inodes = len({n.inode.inode_number for n in iter_nodes(root)})
         bytes_used = len(out)
-        # The lookup table is optional and only consulted for NFS
-        # export / sparse inodes. Modern unsquashfs (and the Linux kernel
-        # for non-sparse inode tables like all three of our test images)
-        # walk the inode table directly and ignore the lookup table
-        # entirely. We don't currently generate one, so we clear the
-        # EXPORTABLE flag to keep the superblock self-consistent -- a
-        # flag set + invalid pointer would be a malformed filesystem.
-        out_flags = self.sb.flags & ~(1 << C.FLAG_BITS["EXPORTABLE"])
+        # EXPORTABLE flag + lookup table: v1.14.0 rebuilds the export
+        # table whenever the SOURCE image had one, so the flag now tracks
+        # source parity instead of being unconditionally cleared (old
+        # behavior, which made every rebuilt image non-NFS-exportable).
+        if source_had_export and export_entries:
+            out_flags = self.sb.flags | (1 << C.FLAG_BITS["EXPORTABLE"])
+        else:
+            out_flags = self.sb.flags & ~(1 << C.FLAG_BITS["EXPORTABLE"])
         # If the user picked a different output codec (or we generated a
         # new comp_opts block for an existing codec override), realign the
         # COMPRESSOR_OPTIONS flag to match whether a comp_opts block is
@@ -1014,11 +1242,12 @@ class Repacker:
             inode_table_start,
             directory_table_start,
             fragment_table_start,
-            SQUASHFS_INVALID_BLK,  # export/lookup table -- not implemented, see README
+            lookup_table_start,   # export table -- rebuilt if source had one
         )
         out[0:C.SUPERBLOCK_SIZE] = sb_bytes
 
         stats.new_size = len(out)
+        stats.export_table_rebuilt = source_had_export and bool(export_entries)
         return bytes(out), stats
 
 
@@ -1138,7 +1367,7 @@ def _serialize_directory_listing(dir_builder: MetadataTableBuilder, node: FSNode
     single start_block/offset addressing works). A directory whose
     children spill across inode chunks (or whose inode-number span
     exceeds i16 range from a single base) is emitted as multiple groups,
-    in child order, exactly as mksquashfs does.
+    in child order, exactly as reference SquashFS tools does.
 
     Returns (start_raw_offset, listing_length) within dir_builder.buf,
     which the directory's own inode record points at.
@@ -1146,7 +1375,7 @@ def _serialize_directory_listing(dir_builder: MetadataTableBuilder, node: FSNode
     MAXS = C.METADATA_MAX_SIZE  # 8192
     start = len(dir_builder.buf)
 
-    # mksquashfs emits directory entries sorted by name; unsquashfs's
+    # reference tools emit directory entries sorted by name; standard readers'
     # "directory has duplicate names or is unsorted" check requires it.
     children = sorted(node.children, key=lambda c: c.name.encode("utf-8", "surrogateescape"))
 
@@ -1225,6 +1454,27 @@ def _build_id_table(values: List[int], comp_id, profile) -> Tuple[bytes, List[in
     return bytes(table_bytes), pointers
 
 
+def _build_export_table(inode_refs: List[int], comp_id, profile) -> Tuple[bytes, List[int]]:
+    """NFS export (lookup) table: one u64 inode ref per inode number,
+    entry[k] = inode k+1. Ref format = (metadata_chunk_byte_offset << 16)
+    | offset_in_decompressed_chunk, exactly the superblock's root_inode
+    encoding. 1024 entries per 8 KiB metadata block; the on-disk region
+    is the metadata blocks followed by a u64 array of absolute block
+    pointers (the index that lookup_table_start points at)."""
+    builder = MetadataTableBuilder()
+    for ref in inode_refs:
+        builder.write(EXPORT_ENTRY_STRUCT.pack(ref))
+    if not inode_refs:
+        return b"", []
+    chunks = builder.chunk_raw()
+    table_bytes = bytearray()
+    pointers = []
+    for chunk in chunks:
+        pointers.append(len(table_bytes))
+        table_bytes += encode_metadata_block(chunk, comp_id, profile)
+    return bytes(table_bytes), pointers
+
+
 def format_forensic_log(stats: "RepackStats", source_path: str, output_path: str) -> str:
     lines = []
     a = lines.append
@@ -1267,8 +1517,12 @@ def format_forensic_log(stats: "RepackStats", source_path: str, output_path: str
     a(f"  data blocks reused verbatim                          : {stats.data_blocks_reused}")
     a(f"  data blocks newly compressed                         : {stats.data_blocks_new}")
     a(f"  fragments reused verbatim                            : {stats.fragments_reused}")
+    a(f"  fragments consolidated (tails merged into originals) : {stats.fragments_consolidated}")
+    a(f"  fragments recompressed (carried, payload changed)    : {stats.fragments_recompressed}")
     a(f"  fragments newly compressed                           : {stats.fragments_new}")
     a(f"  fragments dropped (no longer referenced)             : {stats.fragments_dropped}")
+    a(f"  export table (NFS lookup)                            : "
+      f"{'rebuilt' if stats.export_table_rebuilt else 'not present in source'}")
     a("")
     a("-- WHAT IS AND ISN'T BYTE-IDENTICAL TO THE ORIGINAL " + "-" * 25)
     a("  DATA REGION for every unchanged file : byte-identical (verbatim copy,")

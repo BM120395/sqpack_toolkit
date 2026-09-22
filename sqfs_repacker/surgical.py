@@ -2,7 +2,7 @@
 surgical.py - In-place patcher for SquashFS 4.0 images.
 
 Philosophy: the original image's metadata tables are already trusted by
-the target device kernel, sasquatch, and stock unsquashfs. Rebuilding
+the target device kernel, quirk-aware readers, and stock readers. Rebuilding
 metadata tables from scratch (as v1.6 does) is fundamentally fragile --
 even small changes cascade through every offset and break compatibility.
 

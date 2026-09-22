@@ -327,7 +327,7 @@ def _classify_file(fs: FilesystemImage, path: str, orig: Inode, st: os.stat_resu
     uniform ownership that doesn't match the original -- see
     `_scan_uniform_uid_gid` and its caller), uid/gid differences are
     never reported as changes. This is what makes a non-root extraction
-    (unsquashfs OR --reconstruct, files owned by the extracting user
+    (standard readers OR --reconstruct, files owned by the extracting user
     instead of the image's real uid/gid) compare as UNCHANGED instead of
     669 spurious METADATA_ONLY entries -- the on-disk ownership is an
     artifact of HOW the tree was extracted, not something the user
@@ -451,7 +451,7 @@ def compute_diff(fs: FilesystemImage, source_dir: str) -> DirectoryDiff:
 
     # Bug 2b fix: detect the "every file owned by the extracting user
     # instead of the image's real uid/gid" pattern -- true of ANY non-root
-    # extraction, sqpack's own --reconstruct included, not just unsquashfs.
+    # extraction, sqpack's own --reconstruct included, not just standard readers.
     # When detected, uid/gid differences are never reported as real changes
     # (see _classify_file/_classify_nonfile's suppress_uid_gid parameter);
     # the repacker always uses the ORIGINAL image's uid/gid for content it
@@ -523,7 +523,7 @@ def compute_diff(fs: FilesystemImage, source_dir: str) -> DirectoryDiff:
             for name in child_names:
                 # Skip sqpack's own bookkeeping sidecars at the root.
                 # Both .sqpack_meta.json (source_image metadata) and
-                # .sqpack_devices (the mksquashfs -pf replacement) live
+                # .sqpack_devices (the reference tool -pf replacement) live
                 # in the root of source_dir after --reconstruct. Without
                 # this filter they get classified as ADDED regular files
                 # and inflate inode_count by 1 (and bloat bytes_used).
@@ -537,7 +537,7 @@ def compute_diff(fs: FilesystemImage, source_dir: str) -> DirectoryDiff:
     # Apply the proprietary .sqpack_devices sidecar: every entry that
     # exists in source_dir's sidecar (and is NOT already in the original
     # tree) becomes an ADDED special inode. The sidecar is the
-    # sqpack-proprietary replacement for `mksquashfs -pf` — it lets the
+    # sqpack-proprietary replacement for `reference SquashFS tools -pf` — it lets the
     # user add new device/fifo/socket nodes that couldn't have existed
     # in source-dir at all (because mknod requires root). Paths that
     # ARE in the original tree but absent from the local directory
@@ -579,7 +579,7 @@ def compute_diff(fs: FilesystemImage, source_dir: str) -> DirectoryDiff:
     # the overwhelming majority of cases, a permission limitation (mknod
     # needs root), not a deliberate deletion -- true whether or not a
     # sidecar is present (an externally-extracted tree, e.g. via plain
-    # unsquashfs, never has one at all). These are preserved verbatim from
+    # standard readers, never has one at all). These are preserved verbatim from
     # the original by simply NOT excluding them from the merged tree --
     # they get no DiffEntry, and the repacker's merge step already copies
     # anything not explicitly marked REMOVED from the original untouched.

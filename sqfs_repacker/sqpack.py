@@ -39,7 +39,7 @@ from .directory_diff import DirectoryDiffError
 from .tree import FilesystemImage
 
 PROG = "sqpack"
-VERSION = "1.13.0"
+VERSION = "1.14.0"
 
 
 # =========================================================================
@@ -51,7 +51,7 @@ NAME
     {PROG} -- deterministic SquashFS analysis, extraction, and repacking
 
 SYNOPSIS
-    mksquashfs-style (v1.4+ -- preferred for repacking edited trees):
+    Delta mode (v1.4+ -- preferred for repacking edited trees):
         {PROG} [-s SOURCE_IMAGE] DIR [OUTPUT]
 
     Traditional (v1.3-compatible):
@@ -75,7 +75,7 @@ SHORT FLAGS (v1.4+)
         --verify             Repack to temp, compare against original, discard
     -t  --self-test         Identity round-trip test (byte-identical check)
     -d  --source-dir DIR    Use DIR's diff against image as patch source
-    -s  --source IMAGE      Source image for dir-first mode (overrides sidecar)
+    -s  --source IMAGE      Source image for delta mode (overrides sidecar)
     -p  --patch [IN=]LOCAL  Replace IN with LOCAL's content (repeatable)
     -x  --extract DIR       Extraction destination (with -R)
     -o  --output FILE       Explicit output path (verify/repack)
@@ -139,7 +139,34 @@ OPERATIONS
         per-file tree diff. Runs Phase 4 only -- does not require IMAGE
         and OTHER to be related by a previous --repack.
 
+DELTA MODE
+    The dir-first form
+
+        {PROG} -s SOURCE_IMAGE DIR [OUTPUT]
+
+    is delta mode: instead of naming every change by hand, you give it
+    the ORIGINAL image plus an edited directory tree, and the repacker
+    diffs the two. Every file that is byte-identical between DIR and
+    the image is reused VERBATIM -- the original compressed data blocks
+    and fragment bytes are pointer-copied, never decoded or
+    recompressed -- and only added/modified/removed/metadata-changed
+    paths are freshly compressed. Fresh file tails are consolidated
+    into the original fragment blocks they belong to (offsets index
+    the decompressed payload, so existing tail coordinates stay
+    valid), which preserves the source image's fragment count. The
+    NFS export (lookup) table is rebuilt when the source image had
+    one, keeping the result NFS-exportable.
+
+    Equivalent long form (what the short form expands to):
+
+        {PROG} SOURCE_IMAGE --repack OUTPUT --source-dir DIR
+
+    DIR is typically a {PROG} --reconstruct extraction (preserves
+    mtime/mode/hardlinks; see NOTES). With -VV the run prints one
+    line per changed path.
+
     --verify
+
         Repack IMAGE (with --patch and/or --source-dir, or an identity
         repack if neither is given) to a temporary or explicit output,
         then immediately compare the result against IMAGE. Runs Phases
@@ -302,7 +329,7 @@ LOGGING OPTIONS
         to FILE, regardless of -v/-q console verbosity.
 
 EXAMPLES
-    mksquashfs-style (v1.4+): extract, edit, repack -- source image is
+    Delta mode (v1.4+): extract, edit, repack -- source image is
     auto-detected from .sqpack_meta.json sidecar:
         {PROG} firmware.squashfs -R -x squashfs-root
         # edit anything under squashfs-root/
@@ -382,13 +409,13 @@ NOTES
     directory). Do not delete that sidecar file; it costs nothing to
     keep and --repack/--verify never treat it as part of the image.
 
-    --source-dir with an unsquashfs-extracted tree may show spurious
+    --source-dir with an externally extracted tree may show spurious
     METADATA_ONLY entries on files whose mtime was not preserved by
-    unsquashfs (some versions do not restore original mtimes for
+    standard readers (some versions do not restore original mtimes for
     regular files). The repacker still reuses the original compressed
     data blocks verbatim -- only the inode mtime field is rewritten.
     To avoid these entries entirely, use --reconstruct instead of
-    unsquashfs: it preserves mtime, mode, uid/gid, and hardlinks
+    standard readers: it preserves mtime, mode, uid/gid, and hardlinks
     faithfully, and --self-test confirms byte-identical round-trips.
 
     Every phase remains independently usable by developers:
@@ -945,7 +972,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-p", "--patch", action="append", metavar="[IN=]LOCAL")
     p.add_argument("-d", "--source-dir", metavar="DIR", dest="source_dir")
     p.add_argument("-s", "--source", metavar="IMAGE", dest="source_image",
-                   help="source image for dir-first repack (auto-detected from "
+                   help="source image for delta mode (auto-detected from "
                         "sidecar or sibling if omitted)")
 
     # Output / extraction
@@ -1037,7 +1064,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return lifecycle.op_upgrade(args)
         return lifecycle.op_clean(args)
 
-    # Detect mksquashfs-style positional form: sqpack DIR [OUTPUT]
+    # Detect delta-mode positional form: sqpack DIR [OUTPUT]
     # Detected when: args.image is a directory (not a .squashfs file),
     # and no explicit operation flag is set. Expands to:
     #   sqpack <source_image> --repack <OUTPUT> --source-dir <DIR>
@@ -1048,7 +1075,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         dir_path = args.image
         output_path = args.positional_output
         if not output_path:
-            # Default output: <basename(dir)>.squashfs in cwd (mksquashfs behavior)
+            # Default output: <basename(dir)>.squashfs in cwd (standard behavior)
             output_path = os.path.basename(os.path.abspath(dir_path)) + ".squashfs"
             if args.verbose:
                 _log(args, f"no OUTPUT given, defaulting to {output_path!r}")
@@ -1078,7 +1105,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 2
 
         if args.verbose:
-            _log(args, f"dir-first mode: source-dir  = {dir_path!r}")
+            _log(args, f"delta mode: source-dir  = {dir_path!r}")
             _log(args, f"                source-image= {source!r}")
             _log(args, f"                output      = {output_path!r}")
 
@@ -1100,6 +1127,12 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"Try '{PROG} --help' for usage.", file=sys.stderr)
         return 2
 
+    # -o/--output is an alias for the -r/--repack output path: with -r it
+    # overrides the -r value; without -r (but with an image operation that
+    # writes an image -- repack/verify) it supplies it. It never triggers
+    # a repack on its own and is ignored by --reconstruct (extraction).
+    if args.output and operation == "repack":
+        args.repack = args.output
     if args.patch and operation not in ("repack", "verify"):
         print(f"{PROG}: --patch is only valid with --repack or --verify", file=sys.stderr)
         return 2

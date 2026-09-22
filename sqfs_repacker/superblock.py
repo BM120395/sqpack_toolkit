@@ -7,7 +7,7 @@ form. This is the foundation everything else in the analyzer builds on:
 every table offset the rest of the tool needs comes straight from here.
 
 No inference happens in this module -- it is a pure, literal decode of
-what is actually on disk. Inference (e.g. "which mksquashfs flags would
+what is actually on disk. Inference (e.g. "which reference tool flags would
 reproduce this") happens later in analyzer.py, kept deliberately
 separate so the forensic record always distinguishes "what the file
 says" from "what we concluded about it".
@@ -160,8 +160,8 @@ def parse_superblock(data: bytes) -> Superblock:
     if magic == C.SQUASHFS_MAGIC_SWAP:
         raise SuperblockError(
             "Detected byte-swapped (big-endian) SquashFS magic. This tool "
-            "targets the little-endian v4.x layout produced by mksquashfs/"
-            "sasquatch on essentially all modern (MIPS-LE, ARM, x86) "
+            "targets the little-endian v4.x layout produced by reference SquashFS tools/"
+            "quirk-aware readers on essentially all modern (MIPS-LE, ARM, x86) "
             "embedded targets; big-endian MIPS images need a separate "
             "code path (not implemented)."
         )

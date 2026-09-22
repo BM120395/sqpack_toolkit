@@ -16,7 +16,7 @@ bytes_used 0xe2c9fc, on a 118-LEB UBI volume.
    mid-payload; the real cause was NAND page data containing vendor ECC bytes
    that shifted everything after the first 2048 B page (see the ubipack case
    study for the layout). Symptom pattern: superblock validates 100%
-   (`unsquashfs -s` clean) but extraction fails; container-level xz headers
+   (`reference-tool superblock dump` clean) but extraction fails; container-level xz headers
    and index CRCs pass; payload dies at seemingly random offsets.
 
 2. **Walk metadata by magic + footer, not just size words.** Standard v4
@@ -45,12 +45,12 @@ bytes_used 0xe2c9fc, on a 118-LEB UBI volume.
    decompressing the metadata block the pointer designates and checking the
    content, before inventing pointer-shift theories.
 
-6. **Patch matrices on unsquashfs hit a wall fast.** Editing superblock fields
+6. **Patch matrices on external extraction tools hit a wall fast.** Editing superblock fields
    (fragment_table_start, fragment count, compression id) in a damaged image
    produces cascading unrelated errors (read_id_table, read_inode, FATAL
    corruption) that do NOT localize the real defect. Fix the image bytes
    first (see lessons 1 and the ubipack differential repair), then let stock
-   unsquashfs work unchanged.
+   external readers work unchanged.
 
 ## Failure-stage triangulation (reusable diagnostic)
 

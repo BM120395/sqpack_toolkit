@@ -57,6 +57,11 @@ class Inode:
     # files) -- the same field, the same downstream code path, per the
     # "one shared build() pipeline" requirement.
     raw_content: Optional[bytes] = None
+    # Original on-image file size, captured before raw_content/file_size
+    # are replaced with new content (repack-time only). Pass B needs it to
+    # know the file's OLD tail footprint inside a carried fragment --
+    # after a MODIFIED merge, file_size already reflects the NEW content.
+    orig_file_size: Optional[int] = None
     # When set, this node's ownership differs from the original and the
     # RAW uid/gid value (not yet resolved to an id-table index) is
     # pending resolution once the final id table is known. None means

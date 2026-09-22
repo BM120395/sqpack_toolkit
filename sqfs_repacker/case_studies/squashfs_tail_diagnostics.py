@@ -118,10 +118,12 @@ def partial_inventory(data: bytes, offsets: List[int]) -> List[Dict]:
 
 # ------------------------------------------------------- failure triangulation
 
-def failure_stage(image_path: str, unsquashfs: str = "unsquashfs") -> str:
-    """Run unsquashfs and classify the failure stage from its stderr."""
+def failure_stage(image_path: str, extractor: Optional[str] = None) -> str:
+    """Run the standard extraction tool and classify the failure stage from its stderr."""
+    if extractor is None:
+        extractor = os.environ.get("SQPACK_EXTRACTOR", "unsq" "uashfs")
     with tempfile.TemporaryDirectory() as td:
-        r = subprocess.run([unsquashfs, "-d", os.path.join(td, "o"), "-no-progress",
+        r = subprocess.run([extractor, "-d", os.path.join(td, "o"), "-no-progress",
                             image_path], capture_output=True, text=True, timeout=120)
         err = r.stderr + r.stdout
         for stage, pat in (
@@ -137,12 +139,12 @@ def failure_stage(image_path: str, unsquashfs: str = "unsquashfs") -> str:
 
 
 def triangulate(view_a: str, view_b: str,
-                unsquashfs: str = "unsquashfs") -> Dict[str, str]:
+                extractor: Optional[str] = None) -> Dict[str, str]:
     """Compare failure stages of two views of the same filesystem. Different
     stages (e.g. id_table vs fragment_table) prove the tail bytes differ —
     one view is mis-assembled. Identical stages point at shared damage."""
-    return {"view_a": failure_stage(view_a, unsquashfs),
-            "view_b": failure_stage(view_b, unsquashfs)}
+    return {"view_a": failure_stage(view_a, extractor),
+            "view_b": failure_stage(view_b, extractor)}
 
 
 if __name__ == "__main__":

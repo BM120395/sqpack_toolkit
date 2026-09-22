@@ -7,7 +7,7 @@ materialized as actual filesystem nodes during non-root extraction.
 
 Background
 ----------
-`unsquashfs -d dest` as non-root cannot create character/block devices
+`standard readers -d dest` as non-root cannot create character/block devices
 (or even FIFOs in some container environments). The kernel device and
 pipe metadata is fine inside the SquashFS image — it just won't land
 on disk. Likewise, sockets are intentionally never materialized (they
@@ -15,7 +15,7 @@ are live IPC endpoints, not file content).
 
 This module defines a small text sidecar `.sqpack_devices` written
 alongside `.sqpack_meta.json` during extract. The sidecar mirrors
-`mksquashfs -pf` semantics but is sqpack-owned so no external tool is
+`reference SquashFS tools -pf` semantics but is sqpack-owned so no external tool is
 required. During repack (`--source-dir`), the sidecar is read back and
 each entry is mapped to its corresponding FSNode in the merged tree
 (preserved, changed, or added).

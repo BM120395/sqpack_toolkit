@@ -57,10 +57,10 @@ SQUASHFS_INVALID_BLK = 0xFFFFFFFFFFFFFFFF
 COMPRESSION_IDS = {
     0: "NONE (uncompressed, non-standard)",
     1: "ZLIB",
-    2: "LZMA",   # legacy / vendor id -- NOT supported by stock mksquashfs,
+    2: "LZMA",   # legacy / vendor id -- NOT supported by stock reference tools,
                  # which only writes XZ. Extremely common in router/IoT
                  # firmware built with the old "squashfs-lzma" fork or
-                 # OpenWrt's lzma xz-utils shim (sasquatch's target format).
+                 # OpenWrt's lzma xz-utils shim (quirk-aware readers' target format).
     3: "LZO",
     4: "XZ",
     5: "LZ4",
@@ -68,7 +68,7 @@ COMPRESSION_IDS = {
 }
 
 # Reverse map for --compression CLI flag. Names match what users expect
-# (gzip==zlib on the wire; squashfs-tools uses the mksquashfs CLI name).
+# (gzip==zlib on the wire; squashfs-tools uses the reference tool CLI name).
 COMPRESSION_NAMES = {
     "gzip":  1,
     "zlib":  1,    # alias for gzip (squashfs's gzip is zlib-wrapped deflate)

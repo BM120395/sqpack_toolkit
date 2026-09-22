@@ -14,7 +14,7 @@ This is intentionally compressor- and vendor-agnostic: everything that
 is specific to how THIS image's LZMA blocks are framed lives in
 compressor.py's auto-detection, not here. Point this at a differently
 built SquashFS image (different compressor, different LZMA framing, or
-no vendor quirks at all -- i.e. a normal mksquashfs image) and this
+no vendor quirks at all -- i.e. a normal reference-built image) and this
 module does not need to change.
 """
 

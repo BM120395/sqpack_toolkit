@@ -7,16 +7,16 @@ the compressed on-disk representation using the SAME framing this
 specific image already uses.
 
 Why match the vendor framing instead of switching to the stock
-mksquashfs-compat framing for new content: this image's blocks are
+reference-compat framing for new content: this image's blocks are
 going back onto a real embedded device, and the device's own kernel
-driver is what actually has to decode them -- not desktop unsquashfs.
+driver is what actually has to decode them -- not desktop readers.
 Since we've established the whole original image is internally
 consistent (every block uses the same lc/lp/pb/dict_size and 5-byte
 framing), the safest assumption is that the device's decoder expects
 that framing throughout, so newly-written blocks match it too rather
 than introducing a second, standard-but-different framing the device
 was never built to read. If you point this at an image whose profile
-came back "compat13" (a normal mksquashfs-built image), new blocks are
+came back "compat13" (a normal reference-built image), new blocks are
 written in that framing instead -- the encoder always follows whatever
 profile.lzma_framing Phase 2 detected, it does not hardcode one.
 
@@ -50,7 +50,7 @@ def _encode_lzma_vendor5(payload: bytes, lc: int, lp: int, pb: int, dict_size: i
 
 
 def _encode_lzma_compat13(payload: bytes, lc: int, lp: int, pb: int, dict_size: int) -> bytes:
-    # Standard mksquashfs-compat framing: 5-byte LZMA_alone header + an
+    # Standard reference-compat framing: 5-byte LZMA_alone header + an
     # 8-byte uncompressed-size field (low 4 bytes = real size, high 4
     # bytes = zero), exactly as lzma_xz_wrapper.c writes it, then the raw
     # LZMA1 stream.
@@ -101,7 +101,7 @@ def encode_block(payload: bytes, comp_id: int, profile: CompressorProfile) -> Tu
         # CRITICAL: match the original image's XZ check type. Python's
         # lzma.compress() defaults to CRC64 (check=4), but squashfs-tools
         # and most embedded MIPS kernels emit CRC32 (check=1). If we
-        # write CRC64, stock unsquashfs and the device kernel reject the
+        # write CRC64, stock readers and the device kernel reject the
         # metadata block with "xz_dec_run error" -> kernel panic.
         #
         # ALSO match the LZMA2 dictionary size. Embedded kernels' SquashFS

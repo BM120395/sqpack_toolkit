@@ -16,7 +16,7 @@ verdict that reflects what *this* tool can actually do, on this host,
 right now -- which is the only question that matters for a self-
 contained repacker.
 
-Historical references to stock mksquashfs / unsquashfs / sasquatch
+Historical references to stock reference tools
 remain elsewhere in the codebase (comments, docstrings) because they
 are useful forensic context for understanding *why* a SquashFS image
 looks the way it does -- but the active verification path is entirely
@@ -111,7 +111,7 @@ def probe_encoder(tool_version: Optional[str] = None) -> ToolCapability:
 
 def compressor_is_writable(compression_name: str, cap: ToolCapability) -> Optional[bool]:
     """Returns True/False if we could determine writability, None if
-    unknown. Replaces the old stock-mksquashfs check with an in-house
+    unknown. Replaces the old stock-reference SquashFS tools check with an in-house
     encoder introspection lookup."""
     if not cap.encoder_available:
         return None
@@ -127,7 +127,7 @@ def probe_decoding(image_path: str, max_inodes: Optional[int] = None,
     (no shell-out, no external binary, no tempdir). The result is a
     single human-readable sentence describing what really happened.
 
-    This is the in-house equivalent of "would stock unsquashfs extract
+    This is the in-house equivalent of "would stock readers extract
     this image cleanly?" -- except the answer reflects what *our*
     decoder can do on this host, which is the only question that
     matters for whether Phase 3 will succeed.

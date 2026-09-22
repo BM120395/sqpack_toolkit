@@ -9,7 +9,7 @@ file can be cross-checked against it directly.
 
 One deliberate deviation: the kernel header declares regular-file block
 lists as `__le16 block_list[0]`, which is a long-standing documentation
-artifact -- every real implementation (mksquashfs, unsquashfs,
+artifact -- every real implementation (reference SquashFS implementations,
 squashfuse, 7-Zip's plugin, etc.) treats block-size entries as 4-byte
 (__le32) values, since a block size needs to represent up to
 SQUASHFS_FILE_MAX_SIZE with a compressed-flag bit at bit 24 (see

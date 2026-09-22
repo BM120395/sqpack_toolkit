@@ -24,7 +24,7 @@ this module handles all of them independently:
          5-byte props+dict-size header with NO 8-byte size field; the
          compressed stream starts immediately at byte 5. This is common
          in router/IoT firmware built with older/forked "squashfs-lzma"
-         encoders (the class of tool sasquatch exists to read).
+         encoders (the class of tool quirk-aware readers exists to read).
      Both are tried automatically (see `_decode_lzma_legacy`), in the
      order most likely to succeed fast, and the one that works is
      recorded so the whole image is decoded consistently rather than
@@ -34,7 +34,7 @@ this module handles all of them independently:
   3. As a last resort if NEITHER known framing decodes cleanly: a
      bounded brute-force search over valid LZMA1 (lc, lp, pb) triples
      combined with the dict_size read from whatever header bytes are
-     present. This mirrors what sasquatch does, scoped down to just the
+     present. This mirrors what quirk-aware readers does, scoped down to just the
      property search (34 valid combinations) rather than needing a
      separate binary/toolchain.
 
@@ -90,7 +90,7 @@ class CompressorProfile:
     #   0 = None, 1 = CRC32, 4 = CRC64, 10 = SHA256
     # Stock squashfs-tools and MIPS kernel SquashFS drivers typically use
     # CRC32 (1). Python's lzma.compress defaults to CRC64 (4) which stock
-    # unsquashfs and the device kernel REJECT. We auto-detect this from
+    # standard readers and the device kernel REJECT. We auto-detect this from
     # the original image and use the same value when re-encoding.
     xz_check: int = 1
     # XZ LZMA2 dictionary size (from the encoded block's filter props).
@@ -345,7 +345,7 @@ def decompress_block(raw: bytes, comp_id: int, profile: CompressorProfile,
             # Detect the original image's XZ check type from the stream
             # header byte +7 (after the 6-byte magic+version). This MUST
             # match what we re-encode with -- otherwise the device's XZ
-            # decoder (and stock unsquashfs on older glibc) rejects the
+            # decoder (and stock readers on older glibc) rejects the
             # block with "xz_dec_run error" and the kernel panics when
             # it can't read a metadata block. SquashFS images almost
             # always use CRC32 (1); Python's lzma.compress defaults to

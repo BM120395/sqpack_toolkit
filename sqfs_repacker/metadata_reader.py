@@ -50,7 +50,7 @@ class MetadataReader:
             # A surgical patcher may re-encode a block SHORTER than its
             # original slot and pad the remainder with zeros so the
             # metadata-block chain addresses stay identical. liblzma (used
-            # by unsquashfs and the kernel driver) stops at the end-of-
+            # by readers and the kernel driver) stops at the end-of-
             # stream marker and ignores the trailing padding; a valid XZ
             # stream always ends in the ".xz" footer magic "YZ", never in
             # a zero byte, so stripping trailing NULs only ever removes

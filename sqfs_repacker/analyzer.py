@@ -9,10 +9,10 @@ Pure, read-only forensic analysis of a SquashFS 4.x image. Produces:
   - integrity findings (things that are objectively true/false about
     the file, not opinions)
   - an inferred "build parameter" summary: our best-effort reconstruction
-    of what mksquashfs/sasquatch flags *would* have produced this
+    of what reference SquashFS tools flags *would* have produced this
     layout, clearly separated from the literal facts above it. These
     flags are documented for human readers and forensic comparison;
-    this tool does NOT invoke mksquashfs at runtime -- every byte it
+    this tool does NOT invoke external tools at runtime -- every byte it
     writes goes through our own encoder module.
   - a reproducibility assessment: can our in-house encoder even write
     this compressor, and can our in-house decoder fully decode this
@@ -44,7 +44,7 @@ from .toolcheck import probe_encoder, probe_decoding, compressor_is_writable, To
 @dataclass
 class BuildParameterInference:
     """Best-effort mapping from observed superblock facts to the
-    mksquashfs/sasquatch CLI flags that would most plausibly reproduce
+    reference SquashFS tools CLI flags that would most plausibly reproduce
     them. Each entry records not just the value but the *reasoning*,
     since that's what makes this useful forensically rather than just
     guessy."""
@@ -145,10 +145,10 @@ def _infer_build_parameters(sb: Superblock, cap: ToolCapability) -> BuildParamet
     if not sb.decoded_flags.get("DUPLICATES_REMOVED"):
         bp.set("no-duplicates", True, "DUPLICATES_REMOVED flag is CLEAR: source mkfs ran with duplicate detection disabled.")
     else:
-        bp.reasoning["duplicates"] = "DUPLICATES_REMOVED flag set: default dedup behaviour (mksquashfs default; no flag needed to reproduce)."
+        bp.reasoning["duplicates"] = "DUPLICATES_REMOVED flag set: default dedup behaviour (reference-tool default; no flag needed to reproduce)."
 
     if sb.decoded_flags.get("EXPORTABLE"):
-        bp.set("exportable", True, "EXPORT flag set: NFS export table present (mksquashfs default is ON; -no-exports would clear it).")
+        bp.set("exportable", True, "EXPORT flag set: NFS export table present (reference-tool default is ON; -no-exports would clear it).")
     else:
         bp.set("no-exports", True, "EXPORT flag clear.")
 
@@ -156,7 +156,7 @@ def _infer_build_parameters(sb: Superblock, cap: ToolCapability) -> BuildParamet
         bp.set("no-xattrs", True, "NO_XATTRS flag set / xattr_id_table_start invalid: image built with xattrs stripped.")
 
     bp.reasoning["mkfs_time"] = (
-        f"superblock.mkfs_time={sb.mkfs_time} ({sb.mkfs_time_iso}). mksquashfs stamps "
+        f"superblock.mkfs_time={sb.mkfs_time} ({sb.mkfs_time_iso}). reference tools stamp "
         f"the CURRENT time by default; reproducing this exact value requires explicit "
         f"'-fstime {sb.mkfs_time}' (or '-all-time'/'-mkfs-time' depending on version), "
         f"otherwise every repack changes this field and therefore the image hash even "
@@ -166,11 +166,11 @@ def _infer_build_parameters(sb: Superblock, cap: ToolCapability) -> BuildParamet
 
     if sb.trailing_bytes:
         bp.reasoning["padding"] = (
-            f"{sb.trailing_bytes} byte(s) exist after bytes_used. Could be mksquashfs's "
+            f"{sb.trailing_bytes} byte(s) exist after bytes_used. Could be the reference tools' "
             f"own block-alignment padding, or (very common for router firmware pulled "
             f"via `dd`) trailing padding/appended data introduced by the raw flash dump "
-            f"itself, unrelated to mksquashfs. Reproducing it exactly requires appending "
-            f"the same trailing bytes post-hoc; mksquashfs has no flag for arbitrary "
+            f"itself, unrelated to reference SquashFS tools. Reproducing it exactly requires appending "
+            f"the same trailing bytes post-hoc; reference tools have no flag for arbitrary "
             f"vendor padding."
         )
 
@@ -239,9 +239,9 @@ def _lzma_stream_fingerprint(sb: Superblock, data: bytes) -> Optional[str]:
     lc+lp<=4, pb<=4) or the dictionary size is absurd (e.g. far bigger
     than the whole file), the block does NOT use that framing, which
     means a different/vendor-specific LZMA header layout is in play --
-    exactly the class of image sasquatch's brute-force LZMA-options
+    exactly the class of image quirk-aware readers' brute-force LZMA-options
     resolver exists to handle, and exactly why the user's own prompt
-    named unsquashfs *or* sasquatch as extraction options.
+    named external extraction tools as extraction options.
     """
     if sb.compression != 2:  # only meaningful for legacy LZMA
         return None
@@ -282,7 +282,7 @@ def _lzma_stream_fingerprint(sb: Superblock, data: bytes) -> Optional[str]:
         f"This indicates a VENDOR-SPECIFIC LZMA options/framing variant rather than the "
         f"standard compat format. Resolving the real per-block LZMA properties (likely via "
         f"brute-force search over valid lc/lp/pb/dict_size combinations, the technique used "
-        f"by legacy sasquatch-style readers) is a prerequisite for Phase 2 (metadata "
+        f"by legacy quirk-aware readers) is a prerequisite for Phase 2 (metadata "
         f"reconstruction) on this specific image."
     )
 

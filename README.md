@@ -107,7 +107,7 @@ The installed executable is named **`sqpack`**:
 
 ```sh
 $ sqpack --version
-sqpack 1.13.0
+sqpack 1.14.0
 ```
 
 Include optional compressors at install time:
@@ -149,7 +149,7 @@ python3 sqpack.py --version
 ### Verifying the install
 
 ```sh
-sqpack --version                      # → sqpack 1.13.0
+sqpack --version                      # → sqpack 1.14.0
 sqpack image.squashfs --analyze       # real image analysis (+ anomaly scan)
 sqpack image.squashfs --self-test     # identity round-trip + lifecycle round-trip: PASS/FAIL
 python3 -m unittest tests.test_lifecycle -v   # test suite (from the repo root)
@@ -311,10 +311,10 @@ files stay usable.
 - **`--source-dir`'s fast-path comparison** trusts a size+mtime match as proof
   content is unchanged, without hashing — a deliberate, documented trade-off
   for scaling to large trees.
-- **`--source-dir` with an *unsquashfs*-extracted tree may show spurious
-  `METADATA_ONLY` entries** where unsquashfs didn't preserve the original
+- **`--source-dir` with an *standard readers*-extracted tree may show spurious
+  `METADATA_ONLY` entries** where standard readers didn't preserve the original
   mtime. Harmless (data blocks are still reused verbatim; only the inode
-  mtime field is rewritten). Use `sqpack --reconstruct` instead of unsquashfs
+  mtime field is rewritten). Use `sqpack --reconstruct` instead of standard readers
   to avoid it entirely — it preserves mtime/mode/uid/gid/hardlinks and the
   round trip is byte-identical (verified by `--self-test`).
 - **LZMA block framing** may vary between images: `compressor.py` auto-detects
@@ -355,6 +355,22 @@ sqfs_repacker/
 
 ## Changelog highlights
 
+**v1.14.0 — delta-mode repacking: fragment-count preservation + NFS export table:**
+- Fragment consolidation: fresh/modified file tails are consolidated into
+  the original fragment blocks they belong to (offsets index the
+  decompressed payload, so existing tail coordinates stay valid;
+  overwrite-in-place first, a new fragment only when a tail outgrows its
+  old footprint). Delta rebuilds keep the source image's fragment count.
+- NFS export (lookup) table rebuild: images produced from an exportable
+  source stay exportable (table rebuilt in stock tail order
+  data → inode → dir → fragment → export → id).
+- Tail-convention preservation: a file that existed in the source keeps its
+  own tail storage convention (fragment vs final-block); newly added files
+  follow the superblock policy.
+- `--help` rework: DELTA MODE section; "reference SquashFS tools-style" wording retired.
+- `-o/--output` now aliases the `-r/--repack` output path (overrides it when
+  both are given; ignored without `-r`).
+
 **v1.13.0 — anomaly engine + lifecycle self-management:**
 - `sqfs_anomaly.py`: structural integrity scan on every `--analyze`
   (truncation, table offsets, ordering, metadata sanity) plus bit-rot
@@ -371,7 +387,7 @@ sqfs_repacker/
 flags, verbose per-phase timing.
 
 **v1.2 — production-readiness fixes:**
-- False `BLOCKED` verdict on `--analyze` fixed (permission-only unsquashfs
+- False `BLOCKED` verdict on `--analyze` fixed (permission-only standard readers
   failures no longer misclassified as LZMA decode failures).
 - `--source-dir` no longer reports device/fifo/socket nodes as removed (they
   can't be created without root — now correctly preserved).

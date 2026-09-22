@@ -4,7 +4,7 @@ layout.py
 Builds a byte-exact map of every region in the SquashFS image purely from
 the offsets already published in the superblock -- no decompression
 needed. This is deliberately robust: SquashFS does not guarantee tables
-appear on disk in any particular order (mksquashfs versions differ), so
+appear on disk in any particular order (reference tool versions differ), so
 we discover the layout by sorting whichever start offsets are actually
 present, rather than assuming a fixed order.
 
@@ -81,7 +81,7 @@ def build_layout(sb: Superblock, data: bytes) -> List[Region]:
     # area *starts* -- but we know it always begins immediately after the
     # superblock (and compressor-options block, if present), and runs
     # until whichever table happens to be lowest-addressed on disk.
-    # mksquashfs's actual on-disk order is data area first, then (at the
+    # the reference tools' actual on-disk order is data area first, then (at the
     # tail of the file) inode table, directory table, fragment table,
     # export table, id table, xattr table, in a version-dependent order --
     # so we must NOT assume the inode table immediately follows the
